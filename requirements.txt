@@ -1,0 +1,6 @@
+# Core OCR pipeline
+paddlepaddle
+paddleocr==3.4.0
+
+# Chart generation
+matplotlib

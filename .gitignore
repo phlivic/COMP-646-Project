@@ -17,3 +17,4 @@ PaddleOCR/prototype_out_*/
 # Dataset generation outputs
 datasets/out/
 datasets/out_*/
+datasets/datasets/
