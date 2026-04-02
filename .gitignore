@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Runtime caches generated during OCR runs
+.cache/
+.mplconfig/
+.paddlex/
+
+# Prototype outputs
+PaddleOCR/prototype_out/
+PaddleOCR/prototype_out_*/
+
+# Dataset generation outputs
+datasets/out/
+datasets/out_*/
