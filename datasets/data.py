@@ -89,6 +89,7 @@ class DatasetConfig:
     test_ratio: float = 0.15
     metadata_filename: str = "metadata.jsonl"
     summary_filename: str = "summary.json"
+    skip_reference_style: bool = True
 
 
 @dataclass(frozen=True)
@@ -359,7 +360,12 @@ def _all_style_candidates() -> List[VisualStyle]:
     return candidates
 
 
-def choose_styles_for_base(base_id: str, k: int, global_seed: int) -> List[Tuple[str, VisualStyle]]:
+def choose_styles_for_base(
+    base_id: str,
+    k: int,
+    global_seed: int,
+    include_reference: bool = True,
+) -> List[Tuple[str, VisualStyle]]:
     """Deterministic style sampling per base sample."""
     token = f"{base_id}|{global_seed}".encode("utf-8")
     stable_seed = int(hashlib.sha256(token).hexdigest()[:8], 16)
@@ -367,9 +373,13 @@ def choose_styles_for_base(base_id: str, k: int, global_seed: int) -> List[Tuple
     candidates = _all_style_candidates()
     local_rng.shuffle(candidates)
 
-    reference = VisualStyle(**REFERENCE_STYLE)
-    variants = [("reference", reference)]
-    for i, style in enumerate(candidates[: max(0, k - 1)]):
+    variants: List[Tuple[str, VisualStyle]] = []
+    if include_reference:
+        reference = VisualStyle(**REFERENCE_STYLE)
+        variants.append(("reference", reference))
+
+    num_random = max(0, k - len(variants))
+    for i, style in enumerate(candidates[:num_random]):
         variants.append((f"variant_{i:02d}", style))
     return variants
 
@@ -433,15 +443,68 @@ def render_chart(chart: ChartSpec, style: VisualStyle, output_path: Path, image_
 
 # ----------------------------- Metadata Export -----------------------------
 
-def _split_for_index(idx: int, total: int, cfg: DatasetConfig) -> str:
-    if total == 0:
-        return "train"
-    ratio = idx / float(total)
-    if ratio < cfg.train_ratio:
-        return "train"
-    if ratio < cfg.train_ratio + cfg.val_ratio:
-        return "val"
-    return "test"
+def _allocate_counts(n: int, cfg: DatasetConfig) -> Dict[str, int]:
+    """Allocate train/val/test counts using largest-remainder rounding."""
+    if n <= 0:
+        return {"train": 0, "val": 0, "test": 0}
+
+    exact = {
+        "train": n * cfg.train_ratio,
+        "val": n * cfg.val_ratio,
+        "test": n * cfg.test_ratio,
+    }
+    counts = {k: int(v) for k, v in exact.items()}
+    remainder = n - sum(counts.values())
+
+    if remainder > 0:
+        order = sorted(exact.keys(), key=lambda k: (exact[k] - counts[k], k), reverse=True)
+        for i in range(remainder):
+            counts[order[i % len(order)]] += 1
+
+    return counts
+
+
+def _build_split_plan(
+    base_samples: Sequence[BaseChartSample],
+    style_map: Dict[str, List[Tuple[str, VisualStyle]]],
+    cfg: DatasetConfig,
+) -> Dict[Tuple[str, str], str]:
+    """Assign split at base granularity with stratification by chart type.
+
+    All style variants for the same base_id are forced into the same split.
+    """
+    strata: Dict[str, List[str]] = {}
+    for base_sample in base_samples:
+        base_id = base_sample.chart.base_id
+        chart_type = base_sample.chart.chart_type
+        strata.setdefault(chart_type, []).append(base_id)
+
+    split_plan: Dict[Tuple[str, str], str] = {}
+    for chart_type, base_ids in sorted(strata.items()):
+        token = f"{chart_type}|{cfg.seed}".encode("utf-8")
+        stable_seed = int(hashlib.sha256(token).hexdigest()[:8], 16)
+        local_rng = random.Random(stable_seed)
+        ordered = list(base_ids)
+        local_rng.shuffle(ordered)
+
+        counts = _allocate_counts(len(ordered), cfg)
+        train_end = counts["train"]
+        val_end = train_end + counts["val"]
+
+        base_split: Dict[str, str] = {}
+        for base_id in ordered[:train_end]:
+            base_split[base_id] = "train"
+        for base_id in ordered[train_end:val_end]:
+            base_split[base_id] = "val"
+        for base_id in ordered[val_end:]:
+            base_split[base_id] = "test"
+
+        for base_id in ordered:
+            split = base_split[base_id]
+            for style_id, _ in style_map[base_id]:
+                split_plan[(base_id, style_id)] = split
+
+    return split_plan
 
 
 def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[str], List[Dict]]:
@@ -459,21 +522,30 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
     base_samples = generate_base_samples(config)
     base_samples = sorted(base_samples, key=lambda s: s.chart.base_id)
 
+    include_reference = not config.skip_reference_style
+    style_map: Dict[str, List[Tuple[str, VisualStyle]]] = {
+        sample.chart.base_id: choose_styles_for_base(
+            sample.chart.base_id,
+            config.style_variants_per_base,
+            config.seed,
+            include_reference=include_reference,
+        )
+        for sample in base_samples
+    }
+    split_plan = _build_split_plan(base_samples, style_map, config)
+
     metadata: List[Dict] = []
     images: List[str] = []
     questions: List[str] = []
     gts: List[str] = []
     params: List[Dict] = []
 
-    total = len(base_samples)
-    for idx, base_sample in enumerate(base_samples):
-        split = _split_for_index(idx, total, config)
-        style_variants = choose_styles_for_base(
-            base_sample.chart.base_id, config.style_variants_per_base, config.seed
-        )
+    for base_sample in base_samples:
+        style_variants = style_map[base_sample.chart.base_id]
 
         # Render image once for each style variant, then attach all QA rows.
         for style_id, style in style_variants:
+            split = split_plan[(base_sample.chart.base_id, style_id)]
             filename = f"{base_sample.chart.base_id}__{style_id}.{config.image_format}"
             rel_path = f"{split}/{filename}"
             abs_path = out_dir / rel_path
@@ -563,11 +635,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=str, default="datasets/out")
     parser.add_argument("--num-per-type", type=int, default=100)
-    parser.add_argument("--style-variants-per-base", type=int, default=8)
+    parser.add_argument("--style-variants-per-base", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--image-format", type=str, default="jpg", choices=["jpg", "jpeg", "png"])
     parser.add_argument("--metadata-filename", type=str, default="metadata.jsonl")
     parser.add_argument("--summary-filename", type=str, default="summary.json")
+    parser.add_argument(
+        "--skip-reference-style",
+        dest="skip_reference_style",
+        action="store_true",
+        default=True,
+        help="Skip generating the unprocessed reference style image (default: true).",
+    )
+    parser.add_argument(
+        "--include-reference-style",
+        dest="skip_reference_style",
+        action="store_false",
+        help="Also generate the unprocessed reference style image.",
+    )
 
     return parser.parse_args()
 
@@ -582,6 +667,7 @@ def main() -> None:
         image_format=args.image_format,
         metadata_filename=args.metadata_filename,
         summary_filename=args.summary_filename,
+        skip_reference_style=args.skip_reference_style,
     )
     images, _, _, _ = image_generation(cfg)
     print(f"Generated {len(images)} QA records under: {cfg.output_dir}")
