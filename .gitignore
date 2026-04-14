@@ -16,6 +16,8 @@ __pycache__/
 .mplconfig/
 .paddlex/
 
+runs/*
+
 # Prototype outputs
 PaddleOCR/prototype_out/
 PaddleOCR/prototype_out_*/

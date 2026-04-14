@@ -74,7 +74,7 @@ def build_cli_defaults() -> dict[str, Any]:
     return {
         "dataset_dir": env_values.get("MAIN_DATASET_DIR", "datasets/out"),
         "metadata_path": env_values.get("MAIN_METADATA_PATH") or None,
-        "output_dir": env_values.get("PADDLEOCR_OUTPUT_DIR", "PaddleOCR/runs/latest"),
+        "output_dir": env_values.get("PADDLEOCR_OUTPUT_DIR", "runs/ocr/latest"),
     }
 
 
