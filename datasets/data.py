@@ -409,7 +409,10 @@ def render_chart(chart: ChartSpec, style: VisualStyle, output_path: Path, image_
         ax.set_xlabel("Category")
         ax.set_ylabel("Value")
         ax.set_title("Bar Chart")
+        ax.set_ylim(0, max(chart.values) * 1.12)
         ax.tick_params(axis="x", rotation=style.label_rotation)
+        for i, v in enumerate(chart.values):
+            ax.text(i, v + 0.8, _format_number(v), fontsize=8, ha="center", va="bottom")
     elif chart.chart_type == "line":
         ax.plot(chart.categories, chart.values, marker="o", color=colors[0], linewidth=2.0)
         ax.set_xlabel("Node")

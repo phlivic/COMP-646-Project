@@ -1,5 +1,11 @@
 # macOS
 .DS_Store
+.localhome
+
+# Local environment configuration
+.env
+.env.*
+!.env.example
 
 # Python cache
 __pycache__/
@@ -13,8 +19,10 @@ __pycache__/
 # Prototype outputs
 PaddleOCR/prototype_out/
 PaddleOCR/prototype_out_*/
+PaddleOCR/runs/
 
 # Dataset generation outputs
 datasets/out/
 datasets/out_*/
 datasets/datasets/
+datasets/preview_*/
