@@ -51,8 +51,21 @@ Do not commit real API keys. Runtime `config.json` files should store
 
 ## Generate Dataset
 
-The current main dataset is `datasets/out_504`. It contains 504 images and
-1680 QA records:
+The normal-size dataset is `datasets/out_3000`. It contains 10000 QA records
+and is the dataset size to use for the main experiments:
+
+- 125 base charts per chart type
+- 8 rendered style variants per base chart
+- split: 6960 train, 1520 val, 1520 test
+
+Command used to generate `datasets/out_3000`:
+
+```bash
+python datasets/data.py --output-dir datasets/out_3000 --num-per-type 125 --style-variants-per-base 8 --skip-reference-style --seed 42 --image-format png
+```
+
+The smaller `datasets/out_504` dataset is for quick runs when we need results
+fast. It contains 504 images and 1680 QA records:
 
 - 84 base charts: 28 bar, 28 line, 28 pie
 - 6 variants per base chart: `base` plus five post-processing variants
@@ -73,19 +86,18 @@ The post-processing variants are defined in
 - `compression_jpeg_q50`
 - `blur_r2_noise_s5`
 
-To reproduce the older large PNG dataset shape used by earlier runs
-(`datasets/out_3000`, 10000 QA records), use:
-
-```bash
-python datasets/data.py --output-dir datasets/out_3000 --num-per-type 125 --style-variants-per-base 8 --skip-reference-style --seed 42 --image-format png
-```
-
 ## PaddleOCR Baseline
 
 This baseline runs OCR once per image, parses the chart structure from OCR
 tokens, answers the QA task with rules, and evaluates exact-match accuracy.
 
-Run PaddleOCR on the full `out_504` dataset:
+Run PaddleOCR on the normal-size `out_3000` dataset:
+
+```bash
+python PaddleOCR/run_ocr.py --dataset-dir datasets/out_3000 --output-dir ocr_out_3000_all --split all --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+Run PaddleOCR on the quick `out_504` dataset:
 
 ```bash
 python PaddleOCR/run_ocr.py --dataset-dir datasets/out_504 --output-dir ocr_out_504_all --split all --reuse-ocr-cache --text-det-limit-side-len 960 --text-det-limit-type max
@@ -127,13 +139,13 @@ Latest full `out_504` OCR result:
 This is the `src/run.py` workflow. It sends each chart image and question
 directly to the multimodal model. It does not use OCR context.
 
-Run `gpt-5.4-nano` on the test split:
+Run `gpt-5.4-nano` on the quick `out_504` test split:
 
 ```bash
 python src/run.py --dataset-dir datasets/out_504 --output-dir mm_llm_out_504_gpt54nano_test --split test --backend openai_compatible --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --no-reuse-cache
 ```
 
-Run `gpt-5.4-nano` on the full dataset:
+Run `gpt-5.4-nano` on the quick `out_504` full dataset:
 
 ```bash
 python src/run.py --dataset-dir datasets/out_504 --output-dir mm_llm_out_504_gpt54nano_all --split all --backend openai_compatible --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --reuse-cache
@@ -185,19 +197,19 @@ Latest test `out_504` GPT direct-QA result:
 This is the root-level `run.py` workflow. It runs OCR first, builds a compact
 OCR context, and sends image + question + OCR context to GPT-5.4 nano.
 
-Run on `out_504` test split:
+Run on the quick `out_504` test split:
 
 ```bash
 python run.py --dataset-dir datasets/out_504 --output-dir ocr_gpt54nano_out_504_test --split test --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
 ```
 
-Run on `out_504` full dataset:
+Run on the quick `out_504` full dataset:
 
 ```bash
 python run.py --dataset-dir datasets/out_504 --output-dir ocr_gpt54nano_out_504_all --split all --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
 ```
 
-Earlier OCR-augmented GPT runs in this repository used `datasets/out_3000`:
+OCR-augmented GPT runs on the normal-size `out_3000` dataset:
 
 ```bash
 python run.py --dataset-dir datasets/out_3000 --output-dir ocr_gpt54nano_test --split test --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
@@ -229,12 +241,13 @@ python -m json.tool ocr_out_504_all/metrics_summary.json
 
 ## Output Directories Currently Used
 
-- `datasets/out_504`: current 504-image dataset
+- `datasets/out_3000`: normal-size dataset
+- `datasets/out_504`: quick 504-image dataset for faster runs
 - `ocr_out_504_all`: PaddleOCR full-dataset baseline
 - `mm_llm_out_504_gpt54nano_test`: GPT direct-QA test split
 - `mm_llm_out_504_gpt54nano_all`: GPT direct-QA full dataset
-- `ocr_gpt54nano_test`: earlier OCR-augmented GPT run on `datasets/out_3000` test
-- `ocr_gpt54nano_val`: earlier OCR-augmented GPT run on `datasets/out_3000` val
+- `ocr_gpt54nano_test`: OCR-augmented GPT run on `datasets/out_3000` test
+- `ocr_gpt54nano_val`: OCR-augmented GPT run on `datasets/out_3000` val
 
 ## Baseline Difference
 
