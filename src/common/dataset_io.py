@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from src.common.variant_metadata import extract_variant_metadata
 from src.contracts import QAExample
 
 
@@ -43,11 +44,13 @@ def build_qa_examples(
     for row in filtered_rows:
         image_path = str(row["image_path"])
         abs_image_path = dataset_dir / image_path
+        variant_metadata = extract_variant_metadata(row)
         examples.append(
             QAExample(
                 sample_id=str(row["sample_id"]),
                 base_id=str(row["base_id"]),
-                style_id=str(row["style_id"]),
+                style_id=str(row.get("style_id") or variant_metadata["variant_id"]),
+                **variant_metadata,
                 qa_id=str(row["qa_id"]),
                 task_type=str(row["task_type"]),
                 answer_type=str(row["answer_type"]),

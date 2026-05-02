@@ -30,10 +30,12 @@ import argparse
 import hashlib
 import json
 import random
+import re
 from dataclasses import asdict, dataclass
+from io import BytesIO
 from itertools import product
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 # ----------------------------- Task Definitions -----------------------------
@@ -74,6 +76,15 @@ REFERENCE_STYLE = {
     "quality": "high",
 }
 
+POSTPROCESS_FIELDS: Tuple[str, ...] = (
+    "blur",
+    "noise",
+    "compression",
+    "resize",
+    "brightness",
+    "contrast",
+)
+
 
 # ----------------------------- Data Structures -----------------------------
 
@@ -82,6 +93,8 @@ class DatasetConfig:
     output_dir: str = "datasets/out"
     num_per_type: int = 100
     style_variants_per_base: int = 8
+    variants_config: Optional[str] = None
+    include_base_variant: bool = True
     seed: int = 42
     image_format: str = "jpg"
     train_ratio: float = 0.7
@@ -89,7 +102,7 @@ class DatasetConfig:
     test_ratio: float = 0.15
     metadata_filename: str = "metadata.jsonl"
     summary_filename: str = "summary.json"
-    skip_reference_style: bool = True
+    skip_reference_style: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +115,20 @@ class VisualStyle:
     @property
     def render_quality(self) -> Dict[str, int]:
         return QUALITY_PRESETS[self.quality]
+
+
+@dataclass(frozen=True)
+class VariantPlan:
+    """One image variant to render or derive from the base image."""
+
+    variant_id: str
+    variant_kind: str
+    style_id: str
+    render_style: VisualStyle
+    variation_types: List[str]
+    variation_group: str
+    transforms: Dict[str, Dict[str, Any]]
+    source_variant_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +411,196 @@ def choose_styles_for_base(
     return variants
 
 
+def _slugify(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_.-")
+    return cleaned or "variant"
+
+
+def _stable_int_seed(*parts: object) -> int:
+    token = "|".join(str(part) for part in parts).encode("utf-8")
+    return int(hashlib.sha256(token).hexdigest()[:8], 16)
+
+
+def _compact_number(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _clean_transform_params(value: Any) -> Dict[str, Any]:
+    if value in (None, "", [], {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Transform config must be an object, got {type(value).__name__}.")
+    return dict(value)
+
+
+def _variation_group_for_transform(name: str, params: Dict[str, Any]) -> str:
+    if name == "blur":
+        method = params.get("method", "gaussian")
+        radius = params.get("radius", params.get("value", ""))
+        return f"blur:{method}:r={_compact_number(radius)}"
+    if name == "noise":
+        method = params.get("method", "gaussian")
+        std = params.get("std", params.get("sigma", params.get("value", "")))
+        return f"noise:{method}:std={_compact_number(std)}"
+    if name == "compression":
+        method = params.get("method", "jpeg")
+        quality = params.get("quality", params.get("value", ""))
+        return f"compression:{method}:q={_compact_number(quality)}"
+    if name == "resize":
+        scale = params.get("scale", params.get("factor", params.get("value", "")))
+        return f"resize:scale={_compact_number(scale)}"
+    if name == "brightness":
+        factor = params.get("factor", params.get("value", ""))
+        return f"brightness:factor={_compact_number(factor)}"
+    if name == "contrast":
+        factor = params.get("factor", params.get("value", ""))
+        return f"contrast:factor={_compact_number(factor)}"
+    return f"{name}:{json.dumps(params, sort_keys=True)}"
+
+
+def _variation_group_from_transforms(transforms: Dict[str, Dict[str, Any]]) -> str:
+    parts = [
+        _variation_group_for_transform(name, transforms[name])
+        for name in POSTPROCESS_FIELDS
+        if transforms.get(name)
+    ]
+    return "+".join(parts) if parts else "base"
+
+
+def _variant_id_from_transforms(transforms: Dict[str, Dict[str, Any]]) -> str:
+    group = _variation_group_from_transforms(transforms)
+    return _slugify(group.replace(":", "_").replace("+", "__").replace("=", ""))
+
+
+def _load_postprocess_variant_specs(config_path: Optional[str]) -> List[Dict[str, Any]]:
+    if not config_path:
+        return []
+
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if isinstance(payload, list):
+        raw_specs = payload
+    elif isinstance(payload, dict):
+        raw_specs = payload.get("postprocess_variants") or payload.get("variants") or []
+    else:
+        raise ValueError("Variant config must be a JSON object or list.")
+
+    specs: List[Dict[str, Any]] = []
+    for raw_spec in raw_specs:
+        if not isinstance(raw_spec, dict):
+            raise ValueError("Each variant config entry must be a JSON object.")
+        transforms: Dict[str, Dict[str, Any]] = {}
+        for field in POSTPROCESS_FIELDS:
+            params = _clean_transform_params(raw_spec.get(field))
+            if params:
+                transforms[field] = params
+        if not transforms:
+            continue
+        variant_id = str(raw_spec.get("id") or raw_spec.get("variant_id") or _variant_id_from_transforms(transforms))
+        specs.append(
+            {
+                "variant_id": _slugify(variant_id),
+                "variation_group": str(raw_spec.get("variation_group") or _variation_group_from_transforms(transforms)),
+                "transforms": transforms,
+                "source_variant_id": str(raw_spec.get("source_variant_id") or raw_spec.get("source") or "base"),
+            }
+        )
+    return specs
+
+
+def build_variant_plans_for_base(
+    base_id: str,
+    config: DatasetConfig,
+    postprocess_specs: Optional[Sequence[Dict[str, Any]]] = None,
+) -> List[VariantPlan]:
+    """Build the image variant plan for one semantic chart."""
+
+    plans: List[VariantPlan] = []
+    reference_style = VisualStyle(**REFERENCE_STYLE)
+    include_base = config.include_base_variant and not config.skip_reference_style
+    if include_base:
+        plans.append(
+            VariantPlan(
+                variant_id="base",
+                variant_kind="base",
+                style_id="base",
+                render_style=reference_style,
+                variation_types=[],
+                variation_group="base",
+                transforms={},
+                source_variant_id=None,
+            )
+        )
+
+    style_variants = choose_styles_for_base(
+        base_id,
+        config.style_variants_per_base,
+        config.seed,
+        include_reference=False,
+    )
+    for style_id, style in style_variants:
+        style_group = (
+            f"render_style:font={style.font_family}"
+            f"+theme={style.color_theme}"
+            f"+rot={style.label_rotation}"
+            f"+quality={style.quality}"
+        )
+        plans.append(
+            VariantPlan(
+                variant_id=style_id,
+                variant_kind="render_style",
+                style_id=style_id,
+                render_style=style,
+                variation_types=["render_style"],
+                variation_group=style_group,
+                transforms={},
+                source_variant_id=None,
+            )
+        )
+
+    specs = (
+        list(postprocess_specs)
+        if postprocess_specs is not None
+        else _load_postprocess_variant_specs(config.variants_config)
+    )
+    for spec in specs:
+        transforms = spec["transforms"]
+        plans.append(
+            VariantPlan(
+                variant_id=spec["variant_id"],
+                variant_kind="postprocess",
+                style_id=spec["variant_id"],
+                render_style=reference_style,
+                variation_types=[
+                    field
+                    for field in POSTPROCESS_FIELDS
+                    if transforms.get(field)
+                ],
+                variation_group=spec["variation_group"],
+                transforms=transforms,
+                source_variant_id=spec["source_variant_id"],
+            )
+        )
+
+    seen: set[str] = set()
+    duplicates: List[str] = []
+    for plan in plans:
+        if plan.variant_id in seen:
+            duplicates.append(plan.variant_id)
+            continue
+        seen.add(plan.variant_id)
+    if duplicates:
+        raise ValueError(f"Duplicate variant_id values for {base_id}: {duplicates}")
+    return plans
+
+
 # ----------------------------- Rendering -----------------------------
 
 def _safe_font(font_name: str, plt_mod) -> str:
@@ -444,6 +661,116 @@ def render_chart(chart: ChartSpec, style: VisualStyle, output_path: Path, image_
     plt.close(fig)
 
 
+def _resample_filter(name: str):
+    from PIL import Image
+
+    mapping = {
+        "nearest": Image.Resampling.NEAREST,
+        "bilinear": Image.Resampling.BILINEAR,
+        "bicubic": Image.Resampling.BICUBIC,
+        "lanczos": Image.Resampling.LANCZOS,
+    }
+    return mapping.get(str(name).lower(), Image.Resampling.BICUBIC)
+
+
+def _apply_blur(image, params: Dict[str, Any]):
+    from PIL import ImageFilter
+
+    method = str(params.get("method", "gaussian")).lower()
+    radius = float(params.get("radius", params.get("value", 1.5)))
+    if method == "box":
+        return image.filter(ImageFilter.BoxBlur(radius))
+    return image.filter(ImageFilter.GaussianBlur(radius))
+
+
+def _apply_noise(image, params: Dict[str, Any], seed: int):
+    import numpy as np
+    from PIL import Image
+
+    method = str(params.get("method", "gaussian")).lower()
+    if method != "gaussian":
+        raise ValueError(f"Unsupported noise method: {method}")
+    std = float(params.get("std", params.get("sigma", params.get("value", 5.0))))
+    rng = np.random.default_rng(seed)
+    arr = np.asarray(image.convert("RGB")).astype(np.float32)
+    arr += rng.normal(0.0, std, arr.shape)
+    return Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), mode="RGB")
+
+
+def _apply_compression(image, params: Dict[str, Any]):
+    from PIL import Image
+
+    method = str(params.get("method", "jpeg")).lower()
+    if method not in {"jpg", "jpeg"}:
+        raise ValueError(f"Unsupported compression method: {method}")
+    quality = int(params.get("quality", params.get("value", 55)))
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=quality)
+    buffer.seek(0)
+    with Image.open(buffer) as compressed:
+        return compressed.convert("RGB")
+
+
+def _apply_resize(image, params: Dict[str, Any]):
+    width, height = image.size
+    scale = float(params.get("scale", params.get("factor", params.get("value", 0.5))))
+    if scale <= 0:
+        raise ValueError("Resize scale must be positive.")
+    down_width = max(1, int(round(width * scale)))
+    down_height = max(1, int(round(height * scale)))
+    down_filter = _resample_filter(str(params.get("downsample", "bilinear")))
+    up_filter = _resample_filter(str(params.get("upsample", "bicubic")))
+    return image.resize((down_width, down_height), down_filter).resize((width, height), up_filter)
+
+
+def _apply_enhancement(image, params: Dict[str, Any], kind: str):
+    from PIL import ImageEnhance
+
+    factor = float(params.get("factor", params.get("value", 1.0)))
+    if kind == "brightness":
+        return ImageEnhance.Brightness(image).enhance(factor)
+    if kind == "contrast":
+        return ImageEnhance.Contrast(image).enhance(factor)
+    raise ValueError(f"Unsupported enhancement: {kind}")
+
+
+def apply_postprocess_variant(
+    source_path: Path,
+    output_path: Path,
+    transforms: Dict[str, Dict[str, Any]],
+    image_format: str,
+    seed: int,
+) -> None:
+    """Apply a deterministic sequence of post-processing transforms."""
+
+    from PIL import Image
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source_path) as source_image:
+        image = source_image.convert("RGB")
+
+    for field in POSTPROCESS_FIELDS:
+        params = transforms.get(field)
+        if not params:
+            continue
+        if field == "blur":
+            image = _apply_blur(image, params)
+        elif field == "noise":
+            image = _apply_noise(image, params, seed)
+        elif field == "compression":
+            image = _apply_compression(image, params)
+        elif field == "resize":
+            image = _apply_resize(image, params)
+        elif field in {"brightness", "contrast"}:
+            image = _apply_enhancement(image, params, field)
+
+    save_kwargs: Dict[str, Any] = {}
+    if image_format.lower() in {"jpg", "jpeg"}:
+        save_kwargs["quality"] = 95
+    save_format = "JPEG" if image_format.lower() in {"jpg", "jpeg"} else image_format.upper()
+    image.save(output_path, format=save_format, **save_kwargs)
+
+
 # ----------------------------- Metadata Export -----------------------------
 
 def _allocate_counts(n: int, cfg: DatasetConfig) -> Dict[str, int]:
@@ -469,12 +796,12 @@ def _allocate_counts(n: int, cfg: DatasetConfig) -> Dict[str, int]:
 
 def _build_split_plan(
     base_samples: Sequence[BaseChartSample],
-    style_map: Dict[str, List[Tuple[str, VisualStyle]]],
+    variant_plan_map: Dict[str, List[VariantPlan]],
     cfg: DatasetConfig,
 ) -> Dict[Tuple[str, str], str]:
     """Assign split at base granularity with stratification by chart type.
 
-    All style variants for the same base_id are forced into the same split.
+    All image variants for the same base_id are forced into the same split.
     """
     strata: Dict[str, List[str]] = {}
     for base_sample in base_samples:
@@ -504,8 +831,8 @@ def _build_split_plan(
 
         for base_id in ordered:
             split = base_split[base_id]
-            for style_id, _ in style_map[base_id]:
-                split_plan[(base_id, style_id)] = split
+            for plan in variant_plan_map[base_id]:
+                split_plan[(base_id, plan.variant_id)] = split
 
     return split_plan
 
@@ -525,17 +852,16 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
     base_samples = generate_base_samples(config)
     base_samples = sorted(base_samples, key=lambda s: s.chart.base_id)
 
-    include_reference = not config.skip_reference_style
-    style_map: Dict[str, List[Tuple[str, VisualStyle]]] = {
-        sample.chart.base_id: choose_styles_for_base(
+    postprocess_specs = _load_postprocess_variant_specs(config.variants_config)
+    variant_plan_map: Dict[str, List[VariantPlan]] = {
+        sample.chart.base_id: build_variant_plans_for_base(
             sample.chart.base_id,
-            config.style_variants_per_base,
-            config.seed,
-            include_reference=include_reference,
+            config,
+            postprocess_specs=postprocess_specs,
         )
         for sample in base_samples
     }
-    split_plan = _build_split_plan(base_samples, style_map, config)
+    split_plan = _build_split_plan(base_samples, variant_plan_map, config)
 
     metadata: List[Dict] = []
     images: List[str] = []
@@ -543,23 +869,57 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
     gts: List[str] = []
     params: List[Dict] = []
 
+    rendered_paths: Dict[Tuple[str, str], str] = {}
     for base_sample in base_samples:
-        style_variants = style_map[base_sample.chart.base_id]
+        variant_plans = variant_plan_map[base_sample.chart.base_id]
 
-        # Render image once for each style variant, then attach all QA rows.
-        for style_id, style in style_variants:
-            split = split_plan[(base_sample.chart.base_id, style_id)]
-            filename = f"{base_sample.chart.base_id}__{style_id}.{config.image_format}"
+        # Render or derive one image for each variant, then attach all QA rows.
+        for plan in variant_plans:
+            split = split_plan[(base_sample.chart.base_id, plan.variant_id)]
+            filename = f"{base_sample.chart.base_id}__{plan.variant_id}.{config.image_format}"
             rel_path = f"{split}/{filename}"
             abs_path = out_dir / rel_path
-            render_chart(base_sample.chart, style, abs_path, config.image_format)
+            source_image_path: Optional[str] = None
+
+            if plan.variant_kind == "postprocess":
+                source_variant_id = plan.source_variant_id or "base"
+                source_image_path = rendered_paths.get((base_sample.chart.base_id, source_variant_id))
+                if source_image_path is None:
+                    raise ValueError(
+                        f"Variant {plan.variant_id} for {base_sample.chart.base_id} "
+                        f"requires source variant {source_variant_id}, but it has not been rendered."
+                    )
+                apply_postprocess_variant(
+                    out_dir / source_image_path,
+                    abs_path,
+                    plan.transforms,
+                    config.image_format,
+                    seed=_stable_int_seed(config.seed, base_sample.chart.base_id, plan.variant_id),
+                )
+            else:
+                render_chart(base_sample.chart, plan.render_style, abs_path, config.image_format)
+
+            rendered_paths[(base_sample.chart.base_id, plan.variant_id)] = rel_path
+            style_factors = asdict(plan.render_style)
+            transform_fields = {
+                field: plan.transforms.get(field) or None
+                for field in POSTPROCESS_FIELDS
+            }
 
             for qa in base_sample.qa_items:
-                sample_id = f"{base_sample.chart.base_id}__{style_id}__{qa.qa_id}"
+                sample_id = f"{base_sample.chart.base_id}__{plan.variant_id}__{qa.qa_id}"
                 record = {
                     "sample_id": sample_id,
                     "base_id": base_sample.chart.base_id,
-                    "style_id": style_id,
+                    "style_id": plan.style_id,
+                    "variant_id": plan.variant_id,
+                    "is_base_variant": plan.variant_kind == "base",
+                    "variant_kind": plan.variant_kind,
+                    "variation_types": list(plan.variation_types),
+                    "variation_group": plan.variation_group,
+                    "source_image_path": source_image_path,
+                    "render_style": style_factors if plan.variant_kind == "render_style" else None,
+                    **transform_fields,
                     "qa_id": qa.qa_id,
                     "task_type": qa.task_type,
                     "answer_type": qa.answer_type,
@@ -572,14 +932,23 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
                     "categories": base_sample.chart.categories,
                     "values": base_sample.chart.values,
                     "line_trend": base_sample.chart.line_trend,
-                    "style_factors": asdict(style),
-                    "render_factors": style.render_quality,
+                    "style_factors": style_factors,
+                    "render_factors": plan.render_style.render_quality,
                 }
                 metadata.append(record)
                 images.append(rel_path)
                 questions.append(qa.question)
                 gts.append(qa.answer)
-                params.append(record["style_factors"])
+                params.append(
+                    {
+                        "variant_id": plan.variant_id,
+                        "variant_kind": plan.variant_kind,
+                        "variation_types": list(plan.variation_types),
+                        "variation_group": plan.variation_group,
+                        "style_factors": style_factors,
+                        **transform_fields,
+                    }
+                )
 
     metadata_path = out_dir / config.metadata_filename
     with metadata_path.open("w", encoding="utf-8") as f:
@@ -599,7 +968,7 @@ def style(config: DatasetConfig) -> Tuple[List[str], List[str], List[str]]:
     images, _, _, params = image_generation(config)
     names = [Path(p).name for p in images]
     descriptions = [
-        f"font={p['font_family']}, theme={p['color_theme']}, rot={p['label_rotation']}, quality={p['quality']}"
+        f"variant={p['variant_id']}, types={'+'.join(p['variation_types']) or 'base'}, group={p['variation_group']}"
         for p in params
     ]
     return images, names, descriptions
@@ -609,6 +978,12 @@ def build_summary(metadata: Sequence[Dict]) -> Dict:
     by_chart: Dict[str, int] = {}
     by_split: Dict[str, int] = {}
     by_style_id: Dict[str, int] = {}
+    by_variant_id: Dict[str, int] = {}
+    by_variant_kind: Dict[str, int] = {}
+    by_variation_type: Dict[str, int] = {}
+    by_variation_group: Dict[str, int] = {}
+    by_variation_combination: Dict[str, int] = {}
+    variation_field_counts: Dict[str, int] = {field: 0 for field in POSTPROCESS_FIELDS}
     by_task: Dict[str, int] = {}
     by_points: Dict[str, int] = {}
 
@@ -616,15 +991,36 @@ def build_summary(metadata: Sequence[Dict]) -> Dict:
         by_chart[row["chart_type"]] = by_chart.get(row["chart_type"], 0) + 1
         by_split[row["split"]] = by_split.get(row["split"], 0) + 1
         by_style_id[row["style_id"]] = by_style_id.get(row["style_id"], 0) + 1
+        by_variant_id[row["variant_id"]] = by_variant_id.get(row["variant_id"], 0) + 1
+        by_variant_kind[row["variant_kind"]] = by_variant_kind.get(row["variant_kind"], 0) + 1
+        by_variation_group[row["variation_group"]] = by_variation_group.get(row["variation_group"], 0) + 1
+        variation_types = list(row.get("variation_types") or [])
+        combination_key = "+".join(sorted(variation_types)) if variation_types else "base"
+        by_variation_combination[combination_key] = by_variation_combination.get(combination_key, 0) + 1
+        if not variation_types:
+            by_variation_type["base"] = by_variation_type.get("base", 0) + 1
+        for variation_type in variation_types:
+            by_variation_type[variation_type] = by_variation_type.get(variation_type, 0) + 1
+        for field in POSTPROCESS_FIELDS:
+            if row.get(field):
+                variation_field_counts[field] += 1
         by_task[row["task_type"]] = by_task.get(row["task_type"], 0) + 1
         key = f"{row['chart_type']}_{row['num_points']}"
         by_points[key] = by_points.get(key, 0) + 1
 
+    image_paths = {row["image_path"] for row in metadata}
     return {
         "num_records": len(metadata),
+        "num_images": len(image_paths),
         "chart_type_distribution": by_chart,
         "split_distribution": by_split,
         "style_id_distribution": by_style_id,
+        "variant_id_distribution": by_variant_id,
+        "variant_kind_distribution": by_variant_kind,
+        "variation_type_distribution": by_variation_type,
+        "variation_group_distribution": by_variation_group,
+        "variation_combination_distribution": by_variation_combination,
+        "variation_field_counts": variation_field_counts,
         "task_distribution": by_task,
         "point_count_distribution": by_points,
     }
@@ -639,22 +1035,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="datasets/out")
     parser.add_argument("--num-per-type", type=int, default=100)
     parser.add_argument("--style-variants-per-base", type=int, default=1)
+    parser.add_argument(
+        "--variants-config",
+        type=str,
+        default=None,
+        help="Optional JSON file listing post-processing variants such as blur/noise/compression.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--image-format", type=str, default="jpg", choices=["jpg", "jpeg", "png"])
     parser.add_argument("--metadata-filename", type=str, default="metadata.jsonl")
     parser.add_argument("--summary-filename", type=str, default="summary.json")
     parser.add_argument(
         "--skip-reference-style",
-        dest="skip_reference_style",
-        action="store_true",
+        dest="include_base_variant",
+        action="store_false",
         default=True,
-        help="Skip generating the unprocessed reference style image (default: true).",
+        help="Deprecated compatibility flag; omit the unprocessed base image.",
     )
     parser.add_argument(
         "--include-reference-style",
-        dest="skip_reference_style",
-        action="store_false",
-        help="Also generate the unprocessed reference style image.",
+        dest="include_base_variant",
+        action="store_true",
+        help="Generate the unprocessed base image (default).",
     )
 
     return parser.parse_args()
@@ -666,11 +1068,13 @@ def main() -> None:
         output_dir=args.output_dir,
         num_per_type=args.num_per_type,
         style_variants_per_base=args.style_variants_per_base,
+        variants_config=args.variants_config,
+        include_base_variant=args.include_base_variant,
         seed=args.seed,
         image_format=args.image_format,
         metadata_filename=args.metadata_filename,
         summary_filename=args.summary_filename,
-        skip_reference_style=args.skip_reference_style,
+        skip_reference_style=not args.include_base_variant,
     )
     images, _, _, _ = image_generation(cfg)
     print(f"Generated {len(images)} QA records under: {cfg.output_dir}")
