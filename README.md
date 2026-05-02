@@ -36,8 +36,18 @@ python -c "import paddle; print('paddle:', paddle.__version__); print('gpu:', pa
 python datasets/data.py \
   --output-dir datasets/out \
   --num-per-type 100 \
-  --style-variants-per-base 8
+  --style-variants-per-base 8 \
+  --variants-config configs/variants.example.json
 ```
+
+The generator now creates a `base` image variant by default. Additional render
+style variants are controlled by `--style-variants-per-base`, and optional
+post-processing variants such as blur/noise/compression are listed in
+`--variants-config`. Use `--style-variants-per-base 0` if you only want base
+images plus post-processing variants. Each metadata row includes explicit
+variant fields such as `variant_id`, `is_base_variant`, `variant_kind`, `variation_types`,
+`variation_group`, and per-transform fields like `blur`, `noise`, and
+`compression`. A transform field is `null` when that transform was not applied.
 
 ## Baselines
 This repository currently contains two executable benchmark pipelines:
@@ -76,6 +86,7 @@ Saved outputs under `runs/ocr/latest`:
 - `image_metrics.jsonl`: per-image OCR and parse diagnostics
 - `qa_predictions.jsonl`: per-QA predictions and correctness
 - `metrics_summary.json`: aggregated metrics
+- `base_variant_comparison.json`: base-vs-variant accuracy deltas by variation group
 - `report.md`: compact markdown report
 
 ### MM-LLM Direct-QA Baseline
@@ -110,6 +121,7 @@ Saved outputs under `runs/mm_llm/latest`:
 - `raw_responses.jsonl`: raw model responses and API payload metadata
 - `qa_predictions.jsonl`: parsed predictions and correctness
 - `metrics_summary.json`: aggregated accuracy and latency metrics
+- `base_variant_comparison.json`: base-vs-variant accuracy deltas by variation group
 - `report.md`: compact markdown report
 
 ### Baseline Difference

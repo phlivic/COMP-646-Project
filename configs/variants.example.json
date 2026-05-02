@@ -1,0 +1,43 @@
+{
+  "postprocess_variants": [
+    {
+      "id": "blur_gaussian_r1",
+      "blur": {
+        "method": "gaussian",
+        "radius": 1.0
+      }
+    },
+    {
+      "id": "blur_gaussian_r2",
+      "blur": {
+        "method": "gaussian",
+        "radius": 2.0
+      }
+    },
+    {
+      "id": "noise_gaussian_s5",
+      "noise": {
+        "method": "gaussian",
+        "std": 5.0
+      }
+    },
+    {
+      "id": "compression_jpeg_q50",
+      "compression": {
+        "method": "jpeg",
+        "quality": 50
+      }
+    },
+    {
+      "id": "blur_r2_noise_s5",
+      "blur": {
+        "method": "gaussian",
+        "radius": 2.0
+      },
+      "noise": {
+        "method": "gaussian",
+        "std": 5.0
+      }
+    }
+  ]
+}

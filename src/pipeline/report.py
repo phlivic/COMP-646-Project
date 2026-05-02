@@ -36,6 +36,28 @@ def build_report(summary: dict[str, Any], predictions: list[dict[str, Any]]) -> 
             f"| {chart_type} | {stats['correct']} | {stats['count']} | {stats['accuracy']:.4f} |"
         )
 
+    if summary.get("by_variation_type"):
+        lines.append("")
+        lines.append("## QA Accuracy by Variation Type")
+        lines.append("")
+        lines.append("| variation_type | correct | count | accuracy |")
+        lines.append("|---|---:|---:|---:|")
+        for variation_type, stats in summary["by_variation_type"].items():
+            lines.append(
+                f"| {variation_type} | {stats['correct']} | {stats['count']} | {stats['accuracy']:.4f} |"
+            )
+
+    if summary.get("by_variation_group"):
+        lines.append("")
+        lines.append("## QA Accuracy by Variation Group")
+        lines.append("")
+        lines.append("| variation_group | correct | count | accuracy |")
+        lines.append("|---|---:|---:|---:|")
+        for variation_group, stats in summary["by_variation_group"].items():
+            lines.append(
+                f"| {variation_group} | {stats['correct']} | {stats['count']} | {stats['accuracy']:.4f} |"
+            )
+
     failures = [record for record in predictions if not record["correct"]][:10]
     if failures:
         lines.append("")

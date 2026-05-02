@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.dataset_io import build_qa_examples, load_jsonl_cache, load_metadata, write_jsonl
+from src.common.variant_metadata import build_base_variant_comparison, variant_metadata_from_obj
 from src.config import AppConfig
 from src.contracts import LLMRequest, QAExample
 from src.llm.factory import create_llm_client
@@ -39,6 +40,7 @@ def build_request(example: QAExample, config: AppConfig) -> LLMRequest:
             "sample_id": example.sample_id,
             "task_type": example.task_type,
             "chart_type": example.chart_type,
+            **variant_metadata_from_obj(example),
         },
     )
 
@@ -58,6 +60,9 @@ def build_raw_row(
         "chart_type": example.chart_type,
         "split": example.split,
         "style_id": example.style_id,
+        "base_id": example.base_id,
+        "qa_id": example.qa_id,
+        **variant_metadata_from_obj(example),
         "task_type": example.task_type,
         "answer_type": example.answer_type,
         "question": example.question,
@@ -95,6 +100,8 @@ def run_pipeline(config: AppConfig) -> None:
         write_jsonl(config.output_dir / "qa_predictions.jsonl", predictions)
         with (config.output_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
             json.dump(summary, handle, ensure_ascii=False, indent=2)
+        with (config.output_dir / "base_variant_comparison.json").open("w", encoding="utf-8") as handle:
+            json.dump(build_base_variant_comparison(predictions), handle, ensure_ascii=False, indent=2)
         with (config.output_dir / "report.md").open("w", encoding="utf-8") as handle:
             handle.write(build_report(summary, predictions))
         print("[Done] QA records: 0")
@@ -149,6 +156,8 @@ def run_pipeline(config: AppConfig) -> None:
 
     with (config.output_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
+    with (config.output_dir / "base_variant_comparison.json").open("w", encoding="utf-8") as handle:
+        json.dump(build_base_variant_comparison(predictions), handle, ensure_ascii=False, indent=2)
 
     with (config.output_dir / "report.md").open("w", encoding="utf-8") as handle:
         handle.write(build_report(summary, predictions))

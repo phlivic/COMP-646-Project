@@ -7,6 +7,14 @@ from statistics import mean
 from typing import Any
 
 from src.common.answer_norm import normalize_answer
+from src.common.variant_metadata import (
+    aggregate_accuracy_by_variation_combination,
+    aggregate_accuracy_by_variation_type,
+    aggregate_variation_combination_counts,
+    aggregate_variation_field_counts,
+    build_base_variant_comparison,
+    variant_metadata_from_obj,
+)
 from src.contracts import QAExample
 from src.pipeline.response_parser import ParsedModelAnswer
 
@@ -44,10 +52,13 @@ def build_prediction_record(
 
     return {
         "sample_id": example.sample_id,
+        "base_id": example.base_id,
+        "qa_id": example.qa_id,
         "image_path": example.image_path,
         "chart_type": example.chart_type,
         "split": example.split,
         "style_id": example.style_id,
+        **variant_metadata_from_obj(example),
         "task_type": example.task_type,
         "answer_type": example.answer_type,
         "gt_answer": example.gt_answer,
@@ -109,6 +120,14 @@ def build_summary(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         "by_task_type": aggregate_accuracy(predictions, "task_type"),
         "by_split": aggregate_accuracy(predictions, "split"),
         "by_style_id": aggregate_accuracy(predictions, "style_id"),
+        "by_variant_id": aggregate_accuracy(predictions, "variant_id"),
+        "by_variant_kind": aggregate_accuracy(predictions, "variant_kind"),
+        "by_variation_group": aggregate_accuracy(predictions, "variation_group"),
+        "by_variation_type": aggregate_accuracy_by_variation_type(predictions),
+        "by_variation_combination": aggregate_accuracy_by_variation_combination(predictions),
+        "variation_field_counts": aggregate_variation_field_counts(predictions),
+        "variation_combination_counts": aggregate_variation_combination_counts(predictions),
+        "base_variant_comparison": build_base_variant_comparison(predictions),
         "response_parse_status_distribution": aggregate_distribution(predictions, "response_parse_status"),
         "error_type_distribution": aggregate_distribution(
             [record for record in predictions if record["error_type"] is not None],

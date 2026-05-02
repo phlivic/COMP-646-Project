@@ -37,6 +37,19 @@ class QARecord:
     sample_id: str
     base_id: str
     style_id: str
+    variant_id: str
+    is_base_variant: bool
+    variant_kind: str
+    variation_types: list[str]
+    variation_group: str
+    source_image_path: str | None
+    render_style: dict[str, Any] | None
+    blur: dict[str, Any] | None
+    noise: dict[str, Any] | None
+    compression: dict[str, Any] | None
+    resize: dict[str, Any] | None
+    brightness: dict[str, Any] | None
+    contrast: dict[str, Any] | None
     qa_id: str
     task_type: str
     answer_type: str
@@ -58,6 +71,19 @@ class ImageCase:
     split: str
     base_id: str
     style_id: str
+    variant_id: str
+    is_base_variant: bool
+    variant_kind: str
+    variation_types: list[str]
+    variation_group: str
+    source_image_path: str | None
+    render_style: dict[str, Any] | None
+    blur: dict[str, Any] | None
+    noise: dict[str, Any] | None
+    compression: dict[str, Any] | None
+    resize: dict[str, Any] | None
+    brightness: dict[str, Any] | None
+    contrast: dict[str, Any] | None
     num_points: int
     image_width: int
     image_height: int
@@ -102,10 +128,25 @@ class QAPrediction:
     """Final answer record for one QA item."""
 
     sample_id: str
+    base_id: str
+    qa_id: str
     image_path: str
     chart_type: str
     split: str
     style_id: str
+    variant_id: str
+    is_base_variant: bool
+    variant_kind: str
+    variation_types: list[str]
+    variation_group: str
+    source_image_path: str | None
+    render_style: dict[str, Any] | None
+    blur: dict[str, Any] | None
+    noise: dict[str, Any] | None
+    compression: dict[str, Any] | None
+    resize: dict[str, Any] | None
+    brightness: dict[str, Any] | None
+    contrast: dict[str, Any] | None
     task_type: str
     answer_type: str
     gt_answer: str

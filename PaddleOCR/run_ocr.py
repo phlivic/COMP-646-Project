@@ -24,6 +24,14 @@ if __package__ in {None, ""}:
 
 from PaddleOCR.ocr_engine import build_ocr_engine, filter_tokens, normalize_ocr_result, run_ocr_on_image
 from PaddleOCR.ocr_io import build_image_cases, load_metadata, load_raw_cache, write_jsonl
+from src.common.variant_metadata import (
+    aggregate_accuracy_by_variation_combination,
+    aggregate_accuracy_by_variation_type,
+    aggregate_variation_combination_counts,
+    aggregate_variation_field_counts,
+    build_base_variant_comparison,
+    variant_metadata_from_obj,
+)
 from PaddleOCR.ocr_logic import (
     aggregate_accuracy,
     aggregate_distribution,
@@ -178,6 +186,28 @@ def build_report(
             f"| {chart_type} | {stats['correct']} | {stats['count']} | {stats['accuracy']:.4f} |"
         )
 
+    if summary.get("by_variation_type"):
+        lines.append("")
+        lines.append("## QA Accuracy by Variation Type")
+        lines.append("")
+        lines.append("| variation_type | correct | count | accuracy |")
+        lines.append("|---|---:|---:|---:|")
+        for variation_type, stats in summary["by_variation_type"].items():
+            lines.append(
+                f"| {variation_type} | {stats['correct']} | {stats['count']} | {stats['accuracy']:.4f} |"
+            )
+
+    if summary.get("by_variation_group"):
+        lines.append("")
+        lines.append("## QA Accuracy by Variation Group")
+        lines.append("")
+        lines.append("| variation_group | correct | count | accuracy |")
+        lines.append("|---|---:|---:|---:|")
+        for variation_group, stats in summary["by_variation_group"].items():
+            lines.append(
+                f"| {variation_group} | {stats['correct']} | {stats['count']} | {stats['accuracy']:.4f} |"
+            )
+
     failed_predictions = [record for record in qa_predictions if not record["correct"]][:10]
     if failed_predictions:
         lines.append("")
@@ -260,6 +290,7 @@ def main() -> None:
                 "chart_type": case.chart_type,
                 "split": case.split,
                 "style_id": case.style_id,
+                **variant_metadata_from_obj(case),
                 "token_count": len(tokens),
                 "tokens": [asdict(token) for token in tokens],
             }
@@ -270,6 +301,7 @@ def main() -> None:
                 "chart_type": case.chart_type,
                 "split": case.split,
                 "style_id": case.style_id,
+                **variant_metadata_from_obj(case),
                 **asdict(parsed_chart),
             }
         )
@@ -279,6 +311,7 @@ def main() -> None:
                 "chart_type": case.chart_type,
                 "split": case.split,
                 "style_id": case.style_id,
+                **variant_metadata_from_obj(case),
                 "token_count": len(tokens),
                 "ocr_status": ocr_status,
                 "parse_status": parsed_chart.parse_status,
@@ -297,10 +330,13 @@ def main() -> None:
             error_type = infer_error_type(pred_answer, correct, ocr_status, parsed_chart, evidence)
             prediction = QAPrediction(
                 sample_id=qa.sample_id,
+                base_id=qa.base_id,
+                qa_id=qa.qa_id,
                 image_path=qa.image_path,
                 chart_type=qa.chart_type,
                 split=qa.split,
                 style_id=qa.style_id,
+                **variant_metadata_from_obj(qa),
                 task_type=qa.task_type,
                 answer_type=qa.answer_type,
                 gt_answer=qa.gt_answer,
@@ -357,6 +393,14 @@ def main() -> None:
         "by_task_type": aggregate_accuracy(qa_predictions, "task_type"),
         "by_split": aggregate_accuracy(qa_predictions, "split"),
         "by_style_id": aggregate_accuracy(qa_predictions, "style_id"),
+        "by_variant_id": aggregate_accuracy(qa_predictions, "variant_id"),
+        "by_variant_kind": aggregate_accuracy(qa_predictions, "variant_kind"),
+        "by_variation_group": aggregate_accuracy(qa_predictions, "variation_group"),
+        "by_variation_type": aggregate_accuracy_by_variation_type(qa_predictions),
+        "by_variation_combination": aggregate_accuracy_by_variation_combination(qa_predictions),
+        "variation_field_counts": aggregate_variation_field_counts(qa_predictions),
+        "variation_combination_counts": aggregate_variation_combination_counts(qa_predictions),
+        "base_variant_comparison": build_base_variant_comparison(qa_predictions),
     }
 
     write_jsonl(raw_cache_path, raw_records)
@@ -367,6 +411,8 @@ def main() -> None:
 
     with (output_dir / "metrics_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
+    with (output_dir / "base_variant_comparison.json").open("w", encoding="utf-8") as handle:
+        json.dump(build_base_variant_comparison(qa_predictions), handle, ensure_ascii=False, indent=2)
 
     with (output_dir / "report.md").open("w", encoding="utf-8") as handle:
         handle.write(build_report(summary, image_metrics, qa_predictions))

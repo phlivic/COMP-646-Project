@@ -12,6 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from src.common.variant_metadata import extract_variant_metadata
+
 from .ocr_types import ImageCase, QARecord
 
 
@@ -59,25 +61,29 @@ def build_image_cases(
     for image_path in image_paths:
         rows = sorted(grouped[image_path], key=lambda item: item["sample_id"])
         first = rows[0]
+        case_variant_metadata = extract_variant_metadata(first)
         abs_image_path = dataset_dir / image_path
         width, height = read_image_size(abs_image_path)
-        qa_records = [
-            QARecord(
-                sample_id=row["sample_id"],
-                base_id=row["base_id"],
-                style_id=row["style_id"],
-                qa_id=row["qa_id"],
-                task_type=row["task_type"],
-                answer_type=row["answer_type"],
-                chart_type=row["chart_type"],
-                split=row["split"],
-                image_path=row["image_path"],
-                question=row["question"],
-                gt_answer=str(row["answer"]),
-                num_points=int(row["num_points"]),
+        qa_records = []
+        for row in rows:
+            row_variant_metadata = extract_variant_metadata(row)
+            qa_records.append(
+                QARecord(
+                    sample_id=row["sample_id"],
+                    base_id=row["base_id"],
+                    style_id=str(row.get("style_id") or row_variant_metadata["variant_id"]),
+                    **row_variant_metadata,
+                    qa_id=row["qa_id"],
+                    task_type=row["task_type"],
+                    answer_type=row["answer_type"],
+                    chart_type=row["chart_type"],
+                    split=row["split"],
+                    image_path=row["image_path"],
+                    question=row["question"],
+                    gt_answer=str(row["answer"]),
+                    num_points=int(row["num_points"]),
+                )
             )
-            for row in rows
-        ]
         cases.append(
             ImageCase(
                 image_path=image_path,
@@ -85,7 +91,8 @@ def build_image_cases(
                 chart_type=first["chart_type"],
                 split=first["split"],
                 base_id=first["base_id"],
-                style_id=first["style_id"],
+                style_id=str(first.get("style_id") or case_variant_metadata["variant_id"]),
+                **case_variant_metadata,
                 num_points=int(first["num_points"]),
                 image_width=width,
                 image_height=height,
