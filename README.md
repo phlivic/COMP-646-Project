@@ -1,130 +1,246 @@
 # COMP-646 Project
 
-## Scope
-This project builds a chart understanding dataset for:
-- OCR baselines
-- rule-based baselines
-- multimodal LLM baselines
+This project builds and evaluates a synthetic chart question-answering dataset
+for three chart types:
 
-Supported chart types:
 - bar chart
 - line chart
 - pie chart
 
-## Current Status
-- Dataset construction is **initially completed**.
-- Chart-level QA tasks and style variations are implemented.
-- Metadata is exported in JSONL format for downstream benchmarking.
+The repository contains three executable workflows:
 
-## Deployment (Linux + GPU on NOTS HPC)
-All deployment is designed for Linux with GPU acceleration
+- dataset generation: `datasets/data.py`
+- OCR + rule-based QA baseline: `PaddleOCR/run_ocr.py`
+- multimodal GPT direct-QA baseline: `src/run.py`
 
-### 1. Create environment
+There is also a root-level OCR-augmented GPT runner, `run.py`, which first runs
+PaddleOCR and then sends image + OCR context to GPT-5.4 nano.
+
+## Environment
+
+Run all commands from the repository root.
+
 ```bash
 conda create -n chartqa python=3.11 -y
 conda activate chartqa
 pip install -r requirements.txt
 ```
 
-### 2. GPU runtime check
+Check Paddle runtime:
+
 ```bash
 python -c "import paddle; print('paddle:', paddle.__version__); print('gpu:', paddle.is_compiled_with_cuda())"
 ```
 
-### 3. Generate dataset
-```bash
-python datasets/data.py \
-  --output-dir datasets/out \
-  --num-per-type 100 \
-  --style-variants-per-base 8 \
-  --variants-config configs/variants.example.json
+For GPT runs, set an OpenAI API key first.
+
+PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY="YOUR_API_KEY"
 ```
 
-The generator now creates a `base` image variant by default. Additional render
-style variants are controlled by `--style-variants-per-base`, and optional
-post-processing variants such as blur/noise/compression are listed in
-`--variants-config`. Use `--style-variants-per-base 0` if you only want base
-images plus post-processing variants. Each metadata row includes explicit
-variant fields such as `variant_id`, `is_base_variant`, `variant_kind`, `variation_types`,
-`variation_group`, and per-transform fields like `blur`, `noise`, and
-`compression`. A transform field is `null` when that transform was not applied.
+Bash:
 
-## Baselines
-This repository currently contains two executable benchmark pipelines:
-- `PaddleOCR` chart-QA baseline
-- multimodal LLM direct-QA baseline
-
-### PaddleOCR Baseline
-Run:
 ```bash
-python PaddleOCR/run_ocr.py \
-  --dataset-dir datasets/out \
-  --output-dir runs/ocr/latest
+export OPENAI_API_KEY="YOUR_API_KEY"
 ```
 
-Principle:
-- The pipeline loads `metadata.jsonl`, groups QA rows by image, and runs OCR once per image.
-- OCR tokens are normalized into a unified token format with text, score, and geometry.
-- Chart structure is then recovered from OCR text instead of directly answering from the image.
-- The recovered chart is used to answer each QA item and compare against ground truth.
+Do not commit real API keys. Runtime `config.json` files should store
+`"api_key": "<set>"`, not the raw key.
 
-Chart parsing logic:
-- Bar charts: remove title and axis labels, recover `Cat-N` labels, filter likely y-axis ticks, and align numeric values to categories by x-position.
-- Line charts: recover category labels, detect and remove left-axis tick numbers, assign remaining values to categories by x partitions, then infer the overall trend from recovered values.
-- Pie charts: recover category labels and percentage tokens, pair them by circular order around the pie center, and optionally repair one missing percentage from the 100% total.
+## Generate Dataset
 
-Correctness and metrics:
-- QA correctness is exact-match after normalization of numbers, labels, and categories.
-- The pipeline also reports raw OCR text recall/precision, parse status, evidence completeness, and line-point recovery metrics.
-- This baseline measures a multi-stage process: image -> OCR text -> parsed chart -> answer.
+The current main dataset is `datasets/out_504`. It contains 504 images and
+1680 QA records:
 
-Saved outputs under `runs/ocr/latest`:
-- `config.json`: runtime arguments
-- `ocr_raw.jsonl`: raw OCR engine outputs
-- `ocr_tokens.jsonl`: normalized OCR tokens per image
-- `parsed_charts.jsonl`: recovered chart structures
-- `image_metrics.jsonl`: per-image OCR and parse diagnostics
-- `qa_predictions.jsonl`: per-QA predictions and correctness
-- `metrics_summary.json`: aggregated metrics
-- `base_variant_comparison.json`: base-vs-variant accuracy deltas by variation group
-- `report.md`: compact markdown report
+- 84 base charts: 28 bar, 28 line, 28 pie
+- 6 variants per base chart: `base` plus five post-processing variants
+- split: 1200 train, 240 val, 240 test
 
-### MM-LLM Direct-QA Baseline
-Run:
+Command used to generate `datasets/out_504`:
+
 ```bash
-python src/run.py \
-  --dataset-dir datasets/out \
-  --output-dir runs/mm_llm/latest
+python datasets/data.py --output-dir datasets/out_504 --num-per-type 28 --style-variants-per-base 0 --variants-config configs/variants.example.json --seed 42 --image-format jpg
 ```
 
-Principle:
-- This baseline does not do OCR or explicit chart parsing.
-- Each QA record is turned into one multimodal request containing exactly one chart image and one question.
-- The prompt asks the model to return JSON only, with exactly one field: `{"answer": ...}`.
-- The pipeline supports two backend families: OpenAI-compatible APIs and local Hugging Face multimodal models such as Qwen3-VL.
+The post-processing variants are defined in
+`configs/variants.example.json`:
 
-Execution flow:
-- Load QA rows from `metadata.jsonl` and build one request per `sample_id`.
-- Send the image and question to the configured backend.
-- Cache raw responses by `sample_id` so reruns can reuse previous results.
-- Parse the returned JSON answer, normalize it, and compare it with the ground truth answer.
+- `blur_gaussian_r1`
+- `blur_gaussian_r2`
+- `noise_gaussian_s5`
+- `compression_jpeg_q50`
+- `blur_r2_noise_s5`
 
-Correctness and metrics:
-- Numbers are normalized into the dataset format, so values like `31.333333` become `31.33`.
-- Category answers are normalized to labels such as `Cat-3`.
-- Trend questions are normalized to one of `increasing`, `decreasing`, or `fluctuating`.
-- Final correctness is exact-match after this normalization step.
-- This baseline measures an end-to-end process: image + question -> model answer.
+To reproduce the older large PNG dataset shape used by earlier runs
+(`datasets/out_3000`, 10000 QA records), use:
 
-Saved outputs under `runs/mm_llm/latest`:
-- `config.json`: resolved runtime configuration
-- `raw_responses.jsonl`: raw model responses and API payload metadata
-- `qa_predictions.jsonl`: parsed predictions and correctness
-- `metrics_summary.json`: aggregated accuracy and latency metrics
-- `base_variant_comparison.json`: base-vs-variant accuracy deltas by variation group
-- `report.md`: compact markdown report
+```bash
+python datasets/data.py --output-dir datasets/out_3000 --num-per-type 125 --style-variants-per-base 8 --skip-reference-style --seed 42 --image-format png
+```
 
-### Baseline Difference
-- `PaddleOCR` evaluates a structured perception pipeline and exposes where errors happen: OCR text loss, chart parsing failure, missing evidence, or wrong answer.
-- `MM-LLM direct QA` evaluates the model end-to-end without an explicit intermediate chart representation.
-- Running both is useful because they answer different questions: one measures recoverable chart structure, the other measures direct multimodal reasoning.
+## PaddleOCR Baseline
+
+This baseline runs OCR once per image, parses the chart structure from OCR
+tokens, answers the QA task with rules, and evaluates exact-match accuracy.
+
+Run PaddleOCR on the full `out_504` dataset:
+
+```bash
+python PaddleOCR/run_ocr.py --dataset-dir datasets/out_504 --output-dir ocr_out_504_all --split all --reuse-ocr-cache --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+Run only the test split:
+
+```bash
+python PaddleOCR/run_ocr.py --dataset-dir datasets/out_504 --output-dir ocr_out_504_test --split test --reuse-ocr-cache --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+Run with OCR visualization images:
+
+```bash
+python PaddleOCR/run_ocr.py --dataset-dir datasets/out_504 --output-dir ocr_out_504_test_vis --split test --save-vis --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+Main outputs:
+
+- `config.json`
+- `ocr_raw.jsonl`
+- `ocr_tokens.jsonl`
+- `parsed_charts.jsonl`
+- `image_metrics.jsonl`
+- `qa_predictions.jsonl`
+- `metrics_summary.json`
+- `base_variant_comparison.json`
+- `report.md`
+
+Latest full `out_504` OCR result:
+
+- output: `ocr_out_504_all`
+- images: 504
+- QA records: 1680
+- QA accuracy: 0.7583
+
+## GPT-5.4 Nano Direct-QA Baseline
+
+This is the `src/run.py` workflow. It sends each chart image and question
+directly to the multimodal model. It does not use OCR context.
+
+Run `gpt-5.4-nano` on the test split:
+
+```bash
+python src/run.py --dataset-dir datasets/out_504 --output-dir mm_llm_out_504_gpt54nano_test --split test --backend openai_compatible --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --no-reuse-cache
+```
+
+Run `gpt-5.4-nano` on the full dataset:
+
+```bash
+python src/run.py --dataset-dir datasets/out_504 --output-dir mm_llm_out_504_gpt54nano_all --split all --backend openai_compatible --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --reuse-cache
+```
+
+If the test split has already been run and you want to reuse those cached
+responses before running `all`, copy the cache first:
+
+```bash
+mkdir -p mm_llm_out_504_gpt54nano_all
+cp mm_llm_out_504_gpt54nano_test/raw_responses.jsonl mm_llm_out_504_gpt54nano_all/raw_responses.jsonl
+python src/run.py --dataset-dir datasets/out_504 --output-dir mm_llm_out_504_gpt54nano_all --split all --backend openai_compatible --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --reuse-cache
+```
+
+PowerShell equivalent for the cache copy:
+
+```powershell
+New-Item -ItemType Directory -Force -Path mm_llm_out_504_gpt54nano_all
+Copy-Item mm_llm_out_504_gpt54nano_test\raw_responses.jsonl mm_llm_out_504_gpt54nano_all\raw_responses.jsonl -Force
+python src/run.py --dataset-dir datasets/out_504 --output-dir mm_llm_out_504_gpt54nano_all --split all --backend openai_compatible --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --reuse-cache
+```
+
+Main outputs:
+
+- `config.json`
+- `raw_responses.jsonl`
+- `qa_predictions.jsonl`
+- `metrics_summary.json`
+- `base_variant_comparison.json`
+- `report.md`
+
+Latest full `out_504` GPT direct-QA result:
+
+- output: `mm_llm_out_504_gpt54nano_all`
+- QA records: 1680
+- QA accuracy: 0.8548
+- average latency: 1563.34 ms
+- request errors: 0
+
+Latest test `out_504` GPT direct-QA result:
+
+- output: `mm_llm_out_504_gpt54nano_test`
+- QA records: 240
+- QA accuracy: 0.8417
+- request errors: 0
+
+## OCR-Augmented GPT Runner
+
+This is the root-level `run.py` workflow. It runs OCR first, builds a compact
+OCR context, and sends image + question + OCR context to GPT-5.4 nano.
+
+Run on `out_504` test split:
+
+```bash
+python run.py --dataset-dir datasets/out_504 --output-dir ocr_gpt54nano_out_504_test --split test --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+Run on `out_504` full dataset:
+
+```bash
+python run.py --dataset-dir datasets/out_504 --output-dir ocr_gpt54nano_out_504_all --split all --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+Earlier OCR-augmented GPT runs in this repository used `datasets/out_3000`:
+
+```bash
+python run.py --dataset-dir datasets/out_3000 --output-dir ocr_gpt54nano_test --split test --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+```bash
+python run.py --dataset-dir datasets/out_3000 --output-dir ocr_gpt54nano_val --split val --model-name gpt-5.4-nano --api-base-url https://api.openai.com/v1 --temperature 0 --max-tokens 128 --timeout-seconds 60 --min-ocr-score 0.3 --max-ocr-tokens 80 --reuse-ocr-cache --reuse-response-cache --text-det-limit-side-len 960 --text-det-limit-type max
+```
+
+## Useful Checks
+
+Count predictions:
+
+```bash
+python -c "from pathlib import Path; print(sum(1 for _ in Path('mm_llm_out_504_gpt54nano_all/qa_predictions.jsonl').open(encoding='utf-8')))"
+```
+
+Read the full GPT summary:
+
+```bash
+python -m json.tool mm_llm_out_504_gpt54nano_all/metrics_summary.json
+```
+
+Read the full OCR summary:
+
+```bash
+python -m json.tool ocr_out_504_all/metrics_summary.json
+```
+
+## Output Directories Currently Used
+
+- `datasets/out_504`: current 504-image dataset
+- `ocr_out_504_all`: PaddleOCR full-dataset baseline
+- `mm_llm_out_504_gpt54nano_test`: GPT direct-QA test split
+- `mm_llm_out_504_gpt54nano_all`: GPT direct-QA full dataset
+- `ocr_gpt54nano_test`: earlier OCR-augmented GPT run on `datasets/out_3000` test
+- `ocr_gpt54nano_val`: earlier OCR-augmented GPT run on `datasets/out_3000` val
+
+## Baseline Difference
+
+- PaddleOCR baseline evaluates `image -> OCR text -> parsed chart -> answer`.
+- GPT direct-QA evaluates `image + question -> answer`.
+- OCR-augmented GPT evaluates `image + OCR context + question -> answer`.
+
+These three workflows answer different questions, so their reports should be
+kept separate.
