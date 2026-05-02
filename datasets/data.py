@@ -901,9 +901,13 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
 
             rendered_paths[(base_sample.chart.base_id, plan.variant_id)] = rel_path
             style_factors = asdict(plan.render_style)
+            # Keep metadata sparse: only include optional transform fields when
+            # they actually apply. This avoids many JSON null values such as
+            # "blur": null, "noise": null, etc. for base/render-style variants.
             transform_fields = {
-                field: plan.transforms.get(field) or None
+                field: plan.transforms[field]
                 for field in POSTPROCESS_FIELDS
+                if plan.transforms.get(field)
             }
 
             for qa in base_sample.qa_items:
@@ -917,9 +921,6 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
                     "variant_kind": plan.variant_kind,
                     "variation_types": list(plan.variation_types),
                     "variation_group": plan.variation_group,
-                    "source_image_path": source_image_path,
-                    "render_style": style_factors if plan.variant_kind == "render_style" else None,
-                    **transform_fields,
                     "qa_id": qa.qa_id,
                     "task_type": qa.task_type,
                     "answer_type": qa.answer_type,
@@ -931,24 +932,32 @@ def image_generation(config: DatasetConfig) -> Tuple[List[str], List[str], List[
                     "answer": qa.answer,
                     "categories": base_sample.chart.categories,
                     "values": base_sample.chart.values,
-                    "line_trend": base_sample.chart.line_trend,
                     "style_factors": style_factors,
                     "render_factors": plan.render_style.render_quality,
                 }
+
+                if source_image_path is not None:
+                    record["source_image_path"] = source_image_path
+                if plan.variant_kind == "render_style":
+                    record["render_style"] = style_factors
+                if base_sample.chart.line_trend is not None:
+                    record["line_trend"] = base_sample.chart.line_trend
+                record.update(transform_fields)
+
                 metadata.append(record)
                 images.append(rel_path)
                 questions.append(qa.question)
                 gts.append(qa.answer)
-                params.append(
-                    {
-                        "variant_id": plan.variant_id,
-                        "variant_kind": plan.variant_kind,
-                        "variation_types": list(plan.variation_types),
-                        "variation_group": plan.variation_group,
-                        "style_factors": style_factors,
-                        **transform_fields,
-                    }
-                )
+
+                param_record = {
+                    "variant_id": plan.variant_id,
+                    "variant_kind": plan.variant_kind,
+                    "variation_types": list(plan.variation_types),
+                    "variation_group": plan.variation_group,
+                    "style_factors": style_factors,
+                }
+                param_record.update(transform_fields)
+                params.append(param_record)
 
     metadata_path = out_dir / config.metadata_filename
     with metadata_path.open("w", encoding="utf-8") as f:
